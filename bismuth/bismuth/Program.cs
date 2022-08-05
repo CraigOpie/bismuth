@@ -1,4 +1,7 @@
-﻿using System;
+﻿// using Internal;
+using System.Linq;
+using System.Linq.Expressions;
+using System;
 
 namespace bismuth
 {
@@ -12,18 +15,43 @@ namespace bismuth
                 var line = Console.ReadLine();
                 if (string.IsNullOrWhiteSpace(line)) return;
 
-                var lexer = new Lexer(line);
-                while (true)
+                var parser = new Parser(line);
+                var syntaxTree = parser.Parse();
+
+                var color = Console.ForegroundColor;
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                PrettyPrint(syntaxTree.Root);
+                Console.ForegroundColor = color;
+
+                if (syntaxTree.Diagnostics.Any())
                 {
-                    var token = lexer.NextToken();
-                    if (token.Kind == SyntaxKind.EndOfFileToken) break;
+                    Console.ForegroundColor = ConsoleColor.DarkRed;
+                    foreach (var diagnostic in syntaxTree.Diagnostics) Console.WriteLine(diagnostic);
 
-                    Console.Write($"{token.Kind}: '{token.Text}'");
-                    if (token.Value != null) Console.Write($" {token.Value}");
-
-                    Console.WriteLine();
+                    Console.ForegroundColor = color;
                 }
             }
+        }
+
+        static void PrettyPrint(SyntaxNode node, string indent = "", bool isLast = true)
+        {
+            var marker = isLast ? "└──" : "├──";
+            Console.Write(indent);
+            Console.Write(marker);
+            Console.Write(node.Kind);
+
+            if (node is SyntaxToken t && t.Value != null)
+            {
+                Console.Write(" ");
+                Console.Write(t.Value);
+            }
+
+            Console.WriteLine();
+
+            indent += isLast ? "    " : "│   ";
+            var lastChild = node.GetChildren().LastOrDefault();
+
+            foreach (var child in node.GetChildren()) PrettyPrint(child, indent);
         }
     }
 
@@ -38,12 +66,14 @@ namespace bismuth
         SlashToken,
         OpenParenthesisToken,
         CloseParenthesisToken,
-        BadToken
+        BadToken,
+        NumberExpression,
+        BinaryExpression
     }
 
-    class SyntaxToken
+    class SyntaxToken : SyntaxNode
     {
-        public SyntaxToken(SyntaxKind kind, int position, string text, object? value)
+        public SyntaxToken(SyntaxKind kind, int position, string? text, object? value)
         {
             Kind = kind;
             Position = position;
@@ -51,21 +81,93 @@ namespace bismuth
             Value = value;
         }
 
-        public SyntaxKind Kind { get; }
+        public override SyntaxKind Kind { get; }
         public int Position { get; }
-        public string Text { get; }
+        public string? Text { get; }
         public object? Value { get; }
+
+        public override IEnumerable<SyntaxNode> GetChildren()
+        {
+            return Enumerable.Empty<SyntaxNode>();
+        }
+    }
+
+    abstract class SyntaxNode
+    {
+        public abstract SyntaxKind Kind { get; }
+
+        public abstract IEnumerable<SyntaxNode> GetChildren();
+    }
+
+    abstract class ExpressionSyntax : SyntaxNode
+    {
+
+    }
+
+    sealed class NumberExpressionSyntax : ExpressionSyntax
+    {
+        public NumberExpressionSyntax(SyntaxToken numberToken)
+        {
+            NumberToken = numberToken;
+        }
+
+        public override SyntaxKind Kind => SyntaxKind.NumberExpression;
+        public SyntaxToken NumberToken { get; }
+
+        public override IEnumerable<SyntaxNode> GetChildren()
+        {
+            yield return NumberToken;
+        }
+    }
+
+    sealed class BinaryExpressionSyntax : ExpressionSyntax
+    {
+        public BinaryExpressionSyntax(ExpressionSyntax left, SyntaxToken operatorToken, ExpressionSyntax right)
+        {
+            Left = left;
+            OperatorToken = operatorToken;
+            Right = right;
+        }
+
+        public override SyntaxKind Kind => SyntaxKind.BinaryExpression;
+        public ExpressionSyntax Left { get; }
+        public SyntaxToken OperatorToken { get; }
+        public ExpressionSyntax Right { get; }
+
+        public override IEnumerable<SyntaxNode> GetChildren()
+        {
+            yield return Left;
+            yield return OperatorToken;
+            yield return Right;
+        }
+    }
+
+    sealed class SyntaxTree
+    {
+        public SyntaxTree(IEnumerable<string> diagnostics, ExpressionSyntax root, SyntaxToken endOfFileToken)
+        {
+            Diagnostics = diagnostics.ToArray();
+            Root = root;
+            EndOfFileToken = endOfFileToken;
+        }
+
+        public IReadOnlyList<string> Diagnostics { get; }
+        public ExpressionSyntax Root { get; }
+        public SyntaxToken EndOfFileToken { get; }
     }
 
     class Lexer
     {
         private readonly string _text;
         private int _position;
+        private List<string> _diagnostics = new List<string>();
 
         public Lexer(string text)
         {
             _text = text;
         }
+
+        public IEnumerable<string> Diagnostics => _diagnostics;
 
         private char Current
         {
@@ -113,7 +215,89 @@ namespace bismuth
             else if (Current == '(') return new SyntaxToken(SyntaxKind.OpenParenthesisToken, _position++, "(", null);
             else if (Current == ')') return new SyntaxToken(SyntaxKind.CloseParenthesisToken, _position++, ")", null);
 
+            _diagnostics.Add($"ERROR: bad character in input: '{Current}'");
             return new SyntaxToken(SyntaxKind.BadToken, _position++, _text.Substring(_position - 1, 1), null);
+        }
+    }
+
+    class Parser
+    {
+        private readonly SyntaxToken[] _tokens;
+        private int _postion;
+
+        private List<string> _diagnostics = new List<string>();
+
+        public Parser(string text)
+        {
+            var tokens = new List<SyntaxToken>();
+            var lexer = new Lexer(text);
+
+            SyntaxToken token;
+            do
+            {
+                token = lexer.NextToken();
+
+                if (token.Kind != SyntaxKind.WhiteSpaceToken && token.Kind != SyntaxKind.BadToken)
+                {
+                    tokens.Add(token);
+                }
+            } while (token.Kind != SyntaxKind.EndOfFileToken);
+
+            _tokens = tokens.ToArray();
+            _diagnostics.AddRange(lexer.Diagnostics);
+        }
+
+        public IEnumerable<string> Diagnostics => _diagnostics;
+
+        private SyntaxToken Peek(int offset)
+        {
+            var index = _postion + offset;
+            if (index >= _tokens.Length) return _tokens[_tokens.Length - 1];
+            return _tokens[index];
+        }
+
+        private SyntaxToken Current => Peek(0);
+
+        private SyntaxToken NextToken()
+        {
+            var current = Current;
+            _postion++;
+            return current;
+        }
+
+        private SyntaxToken Match(SyntaxKind kind)
+        {
+            if (Current.Kind == kind) return NextToken();
+
+            _diagnostics.Add($"ERROR: Unexpected token <{Current.Kind}>, expected <{kind}>.");
+            return new SyntaxToken(kind, Current.Position, null, null);
+        }
+
+        public SyntaxTree Parse()
+        {
+            var expression = ParseExpression();
+            var endOfFileToken = Match(SyntaxKind.EndOfFileToken);
+            return new SyntaxTree(_diagnostics, expression, endOfFileToken);
+        }
+
+        public ExpressionSyntax ParseExpression()
+        {
+            var left = ParsePrimaryExpression();
+
+            while (Current.Kind == SyntaxKind.PlusToken || Current.Kind == SyntaxKind.MinusToken)
+            {
+                var operatorToken = NextToken();
+                var right = ParsePrimaryExpression();
+                left = new BinaryExpressionSyntax(left, operatorToken, right);
+            }
+
+            return left;
+        }
+
+        private ExpressionSyntax ParsePrimaryExpression()
+        {
+            var numberToken = Match(SyntaxKind.NumberToken);
+            return new NumberExpressionSyntax(numberToken);
         }
     }
 }
